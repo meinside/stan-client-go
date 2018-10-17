@@ -69,8 +69,8 @@ type Client struct {
 	chanQuitLoop     chan struct{}
 
 	// handlers
-	messageHandler        func(msg *stan.Msg)
-	publishFailureHandler func(subject string, obj interface{})
+	messageHandler             func(msg *stan.Msg)
+	asyncPublishFailureHandler func(subject, nuid string, obj interface{})
 
 	// logger
 	logger Logger
@@ -88,7 +88,7 @@ func Connect(
 	stanClientID string,
 	subscriptions []ToSubscribe,
 	messageHandler func(msg *stan.Msg),
-	publishFailureHandler func(subject string, obj interface{}),
+	asyncPublishFailureHandler func(subject, nuid string, obj interface{}),
 	logger Logger,
 ) *Client {
 	sc := &Client{
@@ -105,8 +105,8 @@ func Connect(
 		toSubscribe: subscriptions,
 		subscribed:  []stan.Subscription{},
 
-		messageHandler:        messageHandler,
-		publishFailureHandler: publishFailureHandler,
+		messageHandler:             messageHandler,
+		asyncPublishFailureHandler: asyncPublishFailureHandler,
 
 		logger: logger,
 	}
@@ -174,31 +174,67 @@ loop:
 	sc.logger.Log("Polling finished")
 }
 
-// Publish to STAN
-func (sc *Client) Publish(subject string, obj interface{}) {
+// Publish publishes to STAN synchronously
+func (sc *Client) Publish(subject string, obj interface{}) (err error) {
 	sc.connLock.Lock()
 	defer sc.connLock.Unlock()
 
 	if sc.stanConn == nil || !sc.stanConnected {
-		sc.logger.Error("Connection to STAN is incomplete")
-		return
+		err = fmt.Errorf("Connection to STAN is incomplete")
+		sc.logger.Error(err.Error())
+		return err
 	}
 
-	if data, err := json.Marshal(obj); err == nil {
-		if nuid, err := sc.stanConn.PublishAsync(subject, data, func(nuid string, err error) {
+	var data []byte
+	if data, err = json.Marshal(obj); err == nil {
+		if err = sc.stanConn.Publish(subject, data); err != nil {
+			err = fmt.Errorf("Failed to publish: %s", err)
+		}
+	} else {
+		err = fmt.Errorf("Failed to serialize data for publish: %s", err)
+	}
+
+	if err != nil {
+		sc.logger.Error(err.Error())
+	}
+
+	return err
+}
+
+// PublishAsync publishes to STAN asynchronously
+func (sc *Client) PublishAsync(subject string, obj interface{}) (nuid string, err error) {
+	sc.connLock.Lock()
+	defer sc.connLock.Unlock()
+
+	if sc.stanConn == nil || !sc.stanConnected {
+		err = fmt.Errorf("Connection to STAN is incomplete")
+		sc.logger.Error(err.Error())
+		return "", err
+	}
+
+	var data []byte
+	if data, err = json.Marshal(obj); err == nil {
+		if nuid, err = sc.stanConn.PublishAsync(subject, data, func(nuid string, err error) {
 			if err != nil {
-				if sc.publishFailureHandler != nil {
-					sc.publishFailureHandler(subject, obj)
+				if sc.asyncPublishFailureHandler != nil {
+					// callback
+					sc.asyncPublishFailureHandler(nuid, subject, obj)
 				} else {
 					sc.logger.Error(fmt.Sprintf("Failed to publish (%s) asynchronously: %s", nuid, err))
 				}
 			}
 		}); err != nil {
-			sc.logger.Error(fmt.Sprintf("Failed to publish (%s): %s", nuid, err))
+			err = fmt.Errorf("Failed to publish (%s): %s", nuid, err)
 		}
 	} else {
-		sc.logger.Error(fmt.Sprintf("Failed to serialize data for publish: %s", err))
+		err = fmt.Errorf("Failed to serialize data for publish: %s", err)
 	}
+
+	if err != nil {
+		sc.logger.Error(err.Error())
+	}
+
+	return nuid, err
 }
 
 // Close closes connections to NATS and STAN servers
@@ -462,7 +498,7 @@ func (sc *Client) subscribe(withLock bool) {
 		if subscribe.DurableName != "" {
 			options = append(options, stan.DurableName(subscribe.DurableName))
 		}
-		// TODO - handle more options here
+		// TODO - handle more subscription options here
 
 		if subscribe.QueueGroupName == "" {
 			if subscription, err := sc.stanConn.Subscribe(subscribe.Subject, func(msg *stan.Msg) {

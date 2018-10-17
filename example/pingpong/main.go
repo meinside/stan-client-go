@@ -13,9 +13,8 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/nats-io/go-nats-streaming"
-
 	"github.com/meinside/stan-client-go"
+	"github.com/nats-io/go-nats-streaming"
 )
 
 const (
@@ -142,8 +141,8 @@ func handlePingPong(message *stan.Msg) {
 	}
 }
 
-func publishFailed(subject string, obj interface{}) {
-	log.Printf("Failed to publish to subject: %s, value: %+v", subject, obj)
+func publishFailed(subject, nuid string, obj interface{}) {
+	log.Printf("Failed to publish to subject: %s, nuid: %s, value: %+v", subject, nuid, obj)
 
 	// resend it later
 	go func(subject string, obj interface{}) {
