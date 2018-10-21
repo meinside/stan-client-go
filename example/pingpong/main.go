@@ -70,11 +70,8 @@ func main() {
 
 	sc = stanclient.Connect(
 		[]string{natsServerURL},
-		natsUsername,
-		natsPassword,
-		clientCertPath,
-		clientKeyPath,
-		rootCaPath,
+		stanclient.AuthOptionWithUsernameAndPassword(natsUsername, natsPassword),
+		stanclient.SecOptionWithCerts(clientCertPath, clientKeyPath, rootCaPath),
 		clusterID,
 		clientID,
 		[]stanclient.ToSubscribe{

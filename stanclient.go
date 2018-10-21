@@ -34,15 +34,55 @@ type ToSubscribe struct {
 	DeliverAll bool
 }
 
+// AuthOption for authentication
+type AuthOption struct {
+	Username               string
+	Password               string
+	hasUsernameAndPassword bool
+
+	Token    string
+	hasToken bool
+}
+
+// AuthOptionWithUsernameAndPassword returns a pointer to AuthOption with username and password
+func AuthOptionWithUsernameAndPassword(username, password string) *AuthOption {
+	return &AuthOption{
+		Username:               username,
+		Password:               password,
+		hasUsernameAndPassword: true,
+	}
+}
+
+// AuthOptionWithToken returns a pointer to AuthOption with token
+func AuthOptionWithToken(token string) *AuthOption {
+	return &AuthOption{
+		Token:    token,
+		hasToken: true,
+	}
+}
+
+// SecOption for security (TLS)
+type SecOption struct {
+	ClientCertPath string
+	ClientKeyPath  string
+	RootCaPath     string
+}
+
+// SecOptionWithCerts returns a pointer to SecOption with certification files' locations
+func SecOptionWithCerts(clientCertPath, clientKeyPath, rootCaPath string) *SecOption {
+	return &SecOption{
+		ClientCertPath: clientCertPath,
+		ClientKeyPath:  clientKeyPath,
+		RootCaPath:     rootCaPath,
+	}
+}
+
 // Client for publish/subscribe with STAN servers
 type Client struct {
 	// values for NATS connection
-	natsServers        []string
-	natsClientUsername string
-	natsClientPasswd   string
-	natsClientCertPath string
-	natsClientKeyPath  string
-	natsRootCaPath     string
+	natsServers    []string
+	natsAuthOption *AuthOption
+	natsSecOption  *SecOption
 
 	// values for STAN connection
 	stanClusterID string
@@ -77,13 +117,20 @@ type Client struct {
 }
 
 // Connect establishes connection to stan servers
+//
+// natsServers: array of NATS URLs
+// natsAuthOption: nil if none
+// natsSecOption: nil if none
+// stanClusterID: cluster ID of STAN
+// stanClientID: client ID of STAN
+// subscriptions: array of subscriptions to subscribe
+// messageHandler: callback function for message handling
+// asyncPublishFailureHandler: callback function for handling failures of PublishAsync function
+// logger: logger interface for logging
 func Connect(
 	natsServers []string,
-	natsClientUsername,
-	natsClientPasswd,
-	natsClientCertPath,
-	natsClientKeyPath,
-	natsRootCaPath,
+	natsAuthOption *AuthOption,
+	natsSecOption *SecOption,
 	stanClusterID,
 	stanClientID string,
 	subscriptions []ToSubscribe,
@@ -92,12 +139,9 @@ func Connect(
 	logger Logger,
 ) *Client {
 	sc := &Client{
-		natsServers:        natsServers,
-		natsClientUsername: natsClientUsername,
-		natsClientPasswd:   natsClientPasswd,
-		natsClientCertPath: natsClientCertPath,
-		natsClientKeyPath:  natsClientKeyPath,
-		natsRootCaPath:     natsRootCaPath,
+		natsServers:    natsServers,
+		natsAuthOption: natsAuthOption,
+		natsSecOption:  natsSecOption,
 
 		stanClusterID: stanClusterID,
 		stanClientID:  stanClientID,
@@ -417,12 +461,9 @@ func (sc *Client) connectToNats(withLock bool) (*nats.Conn, error) {
 		defer sc.connLock.Unlock()
 	}
 
-	conn, err := nats.Connect(
-		strings.Join(sc.natsServers, ", "),
-		nats.UserInfo(sc.natsClientUsername, sc.natsClientPasswd),
-		nats.ClientCert(sc.natsClientCertPath, sc.natsClientKeyPath),
-		nats.RootCAs(sc.natsRootCaPath),
-		nats.ReconnectWait(reconnectDelaySeconds*time.Second),
+	// options for connections
+	options := []nats.Option{
+		nats.ReconnectWait(reconnectDelaySeconds * time.Second),
 		nats.MaxReconnects(-1), // try reconnecting infinitely
 		nats.DisconnectHandler(func(nc *nats.Conn) {
 			sc.handleNatsDisconnection(nc)
@@ -433,6 +474,27 @@ func (sc *Client) connectToNats(withLock bool) (*nats.Conn, error) {
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			sc.handleNatsReconnection(nc)
 		}),
+	}
+
+	// options for authentication (optional)
+	if sc.natsAuthOption != nil {
+		if sc.natsAuthOption.hasUsernameAndPassword {
+			options = append(options, nats.UserInfo(sc.natsAuthOption.Username, sc.natsAuthOption.Password))
+		} else if sc.natsAuthOption.hasToken {
+			options = append(options, nats.Token(sc.natsAuthOption.Token))
+		}
+	}
+
+	// options for TLS security (optional)
+	if sc.natsSecOption != nil {
+		options = append(options, nats.ClientCert(sc.natsSecOption.ClientCertPath, sc.natsSecOption.ClientKeyPath))
+		options = append(options, nats.RootCAs(sc.natsSecOption.RootCaPath))
+	}
+
+	// connect with options,
+	conn, err := nats.Connect(
+		strings.Join(sc.natsServers, ", "),
+		options...,
 	)
 
 	if err != nil {
