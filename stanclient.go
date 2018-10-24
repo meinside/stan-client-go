@@ -92,12 +92,14 @@ type Client struct {
 	natsConn *nats.Conn
 	stanConn stan.Conn
 
-	// sync lock for connections
-	connLock sync.Mutex
+	// sync locks
+	connLock    sync.Mutex
+	serversLock sync.Mutex
 
 	// flags for connections
-	natsConnected bool
-	stanConnected bool
+	natsConnected         bool
+	stanConnected         bool
+	shouldStopConnectLoop bool
 
 	toSubscribe []ToSubscribe
 
@@ -159,29 +161,25 @@ func Connect(
 
 	// initialize connection to NATS,
 	for { // XXX - try infinitely
-		if sc.natsConn, err = sc.connectToNats(true); err != nil {
+		if sc.natsConn, err = sc.connectToNatsWithLock(); err != nil {
 			sc.logger.Error(fmt.Sprintf("Failed to connect to NATS: %s", err))
 
 			// wait for some time
 			time.Sleep(reconnectDelaySeconds * time.Second)
 		} else {
-			sc.natsConnected = true
-
 			break
 		}
 	}
 
 	// and initialize connection to STAN,
 	for { // XXX - try infinitely
-		if sc.stanConn, err = sc.connectToStan(true); err != nil {
+		if sc.stanConn, err = sc.connectToStanWithLock(); err != nil {
 			sc.logger.Error(fmt.Sprintf("Failed to connect and subscribe to STAN: %s", err))
 
 			// wait for some time
 			time.Sleep(reconnectDelaySeconds * time.Second)
 		} else {
-			sc.stanConnected = true
-
-			sc.subscribe(true)
+			sc.subscribeWithLock()
 
 			break
 		}
@@ -190,7 +188,7 @@ func Connect(
 	return sc
 }
 
-// Poll waits for incoming messages from subscriptions
+// Poll waits for incoming messages from subscriptions, with lock on connections
 func (sc *Client) Poll() {
 	sc.logger.Log("Start polling subscriptions")
 
@@ -218,7 +216,7 @@ loop:
 	sc.logger.Log("Polling finished")
 }
 
-// Publish publishes to STAN synchronously
+// Publish publishes to STAN synchronously, with lock on connections
 func (sc *Client) Publish(subject string, obj interface{}) (err error) {
 	sc.connLock.Lock()
 	defer sc.connLock.Unlock()
@@ -245,7 +243,7 @@ func (sc *Client) Publish(subject string, obj interface{}) (err error) {
 	return err
 }
 
-// PublishAsync publishes to STAN asynchronously
+// PublishAsync publishes to STAN asynchronously, with lock on connections
 func (sc *Client) PublishAsync(subject string, obj interface{}) (nuid string, err error) {
 	sc.connLock.Lock()
 	defer sc.connLock.Unlock()
@@ -281,9 +279,15 @@ func (sc *Client) PublishAsync(subject string, obj interface{}) (nuid string, er
 	return nuid, err
 }
 
-// Close closes connections to NATS and STAN servers
+// Close closes connections to NATS and STAN servers with lock on connections
 func (sc *Client) Close() {
+	sc.logger.Log("Closing client...")
+
+	// for stopping infinite-loops of reconnection
+	sc.shouldStopConnectLoop = true
+
 	sc.connLock.Lock()
+	defer sc.connLock.Unlock()
 
 	// stop polling
 	if sc.chanQuitLoop != nil {
@@ -312,11 +316,9 @@ func (sc *Client) Close() {
 		close(sc.chanQuitLoop)
 		sc.chanQuitLoop = nil
 	}
-
-	sc.connLock.Unlock()
 }
 
-// called when NATS disconnects
+// called when NATS disconnects, with lock on connections
 func (sc *Client) handleNatsDisconnection(nc *nats.Conn) {
 	sc.logger.Error("Disconnected from NATS")
 
@@ -339,11 +341,12 @@ func (sc *Client) handleNatsClosed(nc *nats.Conn) {
 	}
 }
 
-// called when NATS recovers connection
+// called when NATS recovers connection, with lock on connections
 func (sc *Client) handleNatsReconnection(nc *nats.Conn) {
 	sc.logger.Error(fmt.Sprintf("Reconnected to NATS: %s", nc.ConnectedUrl()))
 
 	sc.connLock.Lock()
+	defer sc.connLock.Unlock()
 
 	// disconnect from STAN,
 	if sc.stanConn != nil {
@@ -360,12 +363,15 @@ func (sc *Client) handleNatsReconnection(nc *nats.Conn) {
 	// reconnect to STAN,
 	var err error
 	for { // XXX - try infinitely
-		sc.stanConn, err = sc.connectToStan(false)
+		if sc.shouldStopConnectLoop {
+			sc.logger.Error("Exiting connect loop for connection to STAN")
+			return
+		}
+
+		sc.stanConn, err = sc.connectToStan()
 
 		if err == nil {
 			sc.logger.Error("Reconnected to STAN")
-
-			sc.stanConnected = true
 
 			break
 		} else {
@@ -375,15 +381,25 @@ func (sc *Client) handleNatsReconnection(nc *nats.Conn) {
 		}
 	}
 
-	// and resubscribe
 	sc.logger.Error("Resubscribing to STAN")
 
-	sc.subscribe(false)
-
-	sc.connLock.Unlock()
+	// and resubscribe
+	sc.subscribe()
 }
 
-// called when STAN disconnects
+// called when a new server is discovered, with lock on server urls
+func (sc *Client) handleNatsDiscoveredServer(nc *nats.Conn) {
+	sc.logger.Log(fmt.Sprintf("Discovered a new NATS server: %s", nc.ConnectedUrl()))
+
+	sc.serversLock.Lock()
+
+	// append the newly discovered server's url
+	sc.natsServers = append(sc.natsServers, nc.ConnectedUrl())
+
+	sc.serversLock.Unlock()
+}
+
+// called when STAN disconnects, with lock on connection
 func (sc *Client) handleStanDisconnection(conn stan.Conn, err error) {
 	if err != nil {
 		sc.logger.Error(fmt.Sprintf("Connection to STAN closed with error: %s", err))
@@ -392,6 +408,7 @@ func (sc *Client) handleStanDisconnection(conn stan.Conn, err error) {
 	}
 
 	sc.connLock.Lock()
+	defer sc.connLock.Unlock()
 
 	// disconnect from STAN,
 	if sc.stanConn != nil {
@@ -414,12 +431,15 @@ func (sc *Client) handleStanDisconnection(conn stan.Conn, err error) {
 		sc.logger.Error("Reconnecting to NATS...")
 
 		for { // XXX - try infinitely
-			if sc.natsConn, err = sc.connectToNats(false); err != nil {
+			if sc.shouldStopConnectLoop {
+				sc.logger.Error("Exiting connect loop for connection to NATS")
+				return
+			}
+
+			if sc.natsConn, err = sc.connectToNats(); err != nil {
 				// wait for some time
 				time.Sleep(reconnectDelaySeconds * time.Second)
 			} else {
-				sc.natsConnected = true
-
 				break
 			}
 		}
@@ -429,7 +449,12 @@ func (sc *Client) handleStanDisconnection(conn stan.Conn, err error) {
 
 	// reconnect to STAN,
 	for { // XXX - try infinitely
-		sc.stanConn, err = sc.connectToStan(false)
+		if sc.shouldStopConnectLoop {
+			sc.logger.Error("Exiting connect loop for connection to STAN")
+			return
+		}
+
+		sc.stanConn, err = sc.connectToStan()
 
 		if err == nil {
 			sc.logger.Error("Reconnected to STAN")
@@ -444,22 +469,15 @@ func (sc *Client) handleStanDisconnection(conn stan.Conn, err error) {
 		}
 	}
 
-	// and resubscribe
 	sc.logger.Error("Resubscribing to STAN")
 
-	sc.subscribe(false)
-
-	sc.connLock.Unlock()
+	// and resubscribe
+	sc.subscribe()
 }
 
-// establish connection to NATS server
-func (sc *Client) connectToNats(withLock bool) (*nats.Conn, error) {
+// establish connection to NATS server, with lock on server urls
+func (sc *Client) connectToNats() (*nats.Conn, error) {
 	sc.logger.Log("Connecting to NATS")
-
-	if withLock {
-		sc.connLock.Lock()
-		defer sc.connLock.Unlock()
-	}
 
 	// options for connections
 	options := []nats.Option{
@@ -473,6 +491,9 @@ func (sc *Client) connectToNats(withLock bool) (*nats.Conn, error) {
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			sc.handleNatsReconnection(nc)
+		}),
+		nats.DiscoveredServersHandler(func(nc *nats.Conn) {
+			sc.handleNatsDiscoveredServer(nc)
 		}),
 	}
 
@@ -491,9 +512,14 @@ func (sc *Client) connectToNats(withLock bool) (*nats.Conn, error) {
 		options = append(options, nats.RootCAs(sc.natsSecOption.RootCaPath))
 	}
 
+	// join server urls
+	sc.serversLock.Lock()
+	serversURL := strings.Join(sc.natsServers, ", ")
+	sc.serversLock.Unlock()
+
 	// connect with options,
 	conn, err := nats.Connect(
-		strings.Join(sc.natsServers, ", "),
+		serversURL,
 		options...,
 	)
 
@@ -510,14 +536,17 @@ func (sc *Client) connectToNats(withLock bool) (*nats.Conn, error) {
 	return conn, nil
 }
 
-// establish connection to STAN server
-func (sc *Client) connectToStan(withLock bool) (stan.Conn, error) {
-	sc.logger.Log("Connecting to STAN")
+// establish connection to NATS server, with lock on connections
+func (sc *Client) connectToNatsWithLock() (*nats.Conn, error) {
+	sc.connLock.Lock()
+	defer sc.connLock.Unlock()
 
-	if withLock {
-		sc.connLock.Lock()
-		defer sc.connLock.Unlock()
-	}
+	return sc.connectToNats()
+}
+
+// establish connection to STAN server
+func (sc *Client) connectToStan() (stan.Conn, error) {
+	sc.logger.Log("Connecting to STAN")
 
 	conn, err := stan.Connect(
 		sc.stanClusterID,
@@ -540,13 +569,17 @@ func (sc *Client) connectToStan(withLock bool) (stan.Conn, error) {
 	return conn, nil
 }
 
-func (sc *Client) subscribe(withLock bool) {
-	sc.logger.Log("Subscribing to STAN")
+// establish connection to STAN server, with lock on connections
+func (sc *Client) connectToStanWithLock() (stan.Conn, error) {
+	sc.connLock.Lock()
+	defer sc.connLock.Unlock()
 
-	if withLock {
-		sc.connLock.Lock()
-		defer sc.connLock.Unlock()
-	}
+	return sc.connectToStan()
+}
+
+// subscribe to subjects
+func (sc *Client) subscribe() {
+	sc.logger.Log("Subscribing to STAN")
 
 	sc.subscribed = []stan.Subscription{}
 
@@ -582,4 +615,12 @@ func (sc *Client) subscribe(withLock bool) {
 	}
 
 	sc.logger.Log(fmt.Sprintf("Subscribed to %d subscription(s)", len(sc.subscribed)))
+}
+
+// subscribe to subjects, with lock on connections
+func (sc *Client) subscribeWithLock() {
+	sc.connLock.Lock()
+	defer sc.connLock.Unlock()
+
+	sc.subscribe()
 }
