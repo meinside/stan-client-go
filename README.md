@@ -18,6 +18,8 @@ See the [examples here](https://github.com/meinside/stan-client-go/tree/master/e
 
 ## TODO
 
+- [ ] Fix possible goroutine leaks on disconnects
+- [ ] Add more utility functions
 - [ ] Support more connection/subscription options
 - [ ] Add test codes
 
