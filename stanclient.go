@@ -1,5 +1,7 @@
 package stanclient
 
+// STAN client wrapper
+
 import (
 	"encoding/json"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"github.com/nats-io/go-nats-streaming"
 )
 
+// Constants
 const (
 	connectTimeoutSeconds = 5
 	reconnectDelaySeconds = 5
@@ -158,30 +161,32 @@ func Connect(
 	}
 
 	var err error
-
-	// initialize connection to NATS,
 	for { // XXX - try infinitely
-		if sc.natsConn, err = sc.connectToNats(); err != nil {
+		if sc.natsConn != nil {
+			sc.natsConn.Close()
+			sc.natsConn = nil
+		}
+		sc.natsConnected = false
+
+		// initialize connection to NATS,
+		if err = sc.connectToNats(); err != nil {
 			sc.logger.Error(fmt.Sprintf("Failed to connect to NATS: %s", err))
 
 			// wait for some time
 			time.Sleep(reconnectDelaySeconds * time.Second)
 		} else {
-			break
-		}
-	}
+			// and initialize connection to STAN,
+			if err = sc.connectToStan(); err != nil {
+				sc.logger.Error(fmt.Sprintf("Failed to connect and subscribe to STAN: %s", err))
 
-	// and initialize connection to STAN,
-	for { // XXX - try infinitely
-		if sc.stanConn, err = sc.connectToStan(sc.natsConn); err != nil {
-			sc.logger.Error(fmt.Sprintf("Failed to connect and subscribe to STAN: %s", err))
+				// wait for some time
+				time.Sleep(reconnectDelaySeconds * time.Second)
+			} else {
+				// then subscribe
+				sc.subscribe()
 
-			// wait for some time
-			time.Sleep(reconnectDelaySeconds * time.Second)
-		} else {
-			sc.subscribe()
-
-			break
+				break
+			}
 		}
 	}
 
@@ -221,22 +226,6 @@ func (sc *Client) Publish(subject string, obj interface{}) (err error) {
 	sc.connLock.Lock()
 	defer sc.connLock.Unlock()
 
-	if sc.stanConn == nil || !sc.stanConnected {
-		if sc.natsConn != nil {
-			// connect to STAN
-			sc.stanConn, err = sc.connectToStan(sc.natsConn)
-			if err != nil {
-				err = fmt.Errorf("Failed to publish: connection to STAN is incomplete: %s", err)
-				sc.logger.Error(err.Error())
-				return err
-			}
-		} else {
-			err = fmt.Errorf("Failed to publish: connection to NATS is incomplete")
-			sc.logger.Error(err.Error())
-			return err
-		}
-	}
-
 	var data []byte
 	if data, err = json.Marshal(obj); err == nil {
 		if err = sc.stanConn.Publish(subject, data); err != nil {
@@ -258,29 +247,13 @@ func (sc *Client) PublishAsync(subject string, obj interface{}) (nuid string, er
 	sc.connLock.Lock()
 	defer sc.connLock.Unlock()
 
-	if sc.stanConn == nil || !sc.stanConnected {
-		if sc.natsConn != nil {
-			// connect to STAN
-			sc.stanConn, err = sc.connectToStan(sc.natsConn)
-			if err != nil {
-				err = fmt.Errorf("Failed to publish asynchronously: connection to STAN is incomplete: %s", err)
-				sc.logger.Error(err.Error())
-				return "", err
-			}
-		} else {
-			err = fmt.Errorf("Failed to publish asynchronously: connection to NATS is incomplete")
-			sc.logger.Error(err.Error())
-			return "", err
-		}
-	}
-
 	var data []byte
 	if data, err = json.Marshal(obj); err == nil {
 		if nuid, err = sc.stanConn.PublishAsync(subject, data, func(nuid string, err error) {
 			if err != nil {
 				if sc.asyncPublishFailureHandler != nil {
 					// callback
-					sc.asyncPublishFailureHandler(nuid, subject, obj)
+					sc.asyncPublishFailureHandler(subject, nuid, obj)
 				} else {
 					sc.logger.Error(fmt.Sprintf("Failed to publish (%s) asynchronously: %s", nuid, err))
 				}
@@ -372,6 +345,8 @@ func (sc *Client) handleNatsReconnection(nc *nats.Conn) {
 
 	// disconnect from STAN,
 	if sc.stanConn != nil {
+		sc.logger.Error("Handling NATS reconnection: closing STAN connection...")
+
 		// XXX - unsubscribe (without doing this manually, goroutines leak...)
 		for _, subscription := range sc.subscribed {
 			subscription.Close()
@@ -379,22 +354,19 @@ func (sc *Client) handleNatsReconnection(nc *nats.Conn) {
 
 		sc.stanConn.Close()
 		sc.stanConn = nil
-		sc.stanConnected = false
 	}
+	sc.stanConnected = false
 
 	sc.logger.Error("Handling NATS reconnection: reconnecting to STAN...")
 
-	// reconnect to STAN,
-	var err error
+	// then reconnect to STAN,
 	for { // XXX - try infinitely
 		if sc.shouldStopAll {
-			sc.logger.Error("Handling NATS reconnection: exiting loop for reconnection to STAN")
+			sc.logger.Error("Handling NATS reconnection: exiting loop for reconnection")
 			return
 		}
 
-		sc.stanConn, err = sc.connectToStan(nc)
-
-		if err == nil {
+		if err := sc.connectToStan(); err == nil {
 			sc.logger.Error("Handling NATS reconnection: reconnected to STAN")
 
 			break
@@ -446,49 +418,39 @@ func (sc *Client) handleStanDisconnection(conn stan.Conn, err error) {
 	}
 	sc.stanConnected = false
 
-	if !sc.natsConnected {
-		// ????? needed?
-		if sc.natsConn != nil {
-			sc.natsConn.Close()
-			sc.natsConn = nil
-		}
+	sc.logger.Error("Handling STAN disconnection: reestablishing connection to NATS...")
 
-		sc.logger.Error("Handling STAN disconnection: reconnecting to NATS...")
-
-		for { // XXX - try infinitely
-			if sc.shouldStopAll {
-				sc.logger.Error("Handling STAN disconnection: exiting loop for reconnection to NATS")
-				return
-			}
-
-			if sc.natsConn, err = sc.connectToNats(); err != nil {
-				// wait for some time
-				time.Sleep(reconnectDelaySeconds * time.Second)
-			} else {
-				break
-			}
-		}
-	}
-
-	sc.logger.Error("Handling STAN disconnection: reconnecting to STAN...")
-
-	// reconnect to STAN,
 	for { // XXX - try infinitely
 		if sc.shouldStopAll {
-			sc.logger.Error("Handling STAN disconnection: exiting connect loop for connection to STAN")
+			sc.logger.Error("Handling STAN disconnection: exiting loop for reconnection")
+
 			return
 		}
 
-		sc.stanConn, err = sc.connectToStan(sc.natsConn)
+		if sc.natsConn != nil {
+			sc.logger.Error("Handling STAN disconnection: resetting NATS connection")
 
-		if err == nil {
-			sc.logger.Error("Handling STAN disconnection: reconnected to STAN")
+			sc.natsConn.Close()
+			sc.natsConn = nil
+		}
+		sc.natsConnected = false
 
-			break
-		} else {
-			sc.logger.Error(fmt.Sprintf("Handling STAN disconnection: failed to reconnect to STAN: %s", err))
-
+		if err = sc.connectToNats(); err != nil {
+			// wait for some time
 			time.Sleep(reconnectDelaySeconds * time.Second)
+		} else {
+			sc.logger.Error("Handling STAN disconnection: reconnecting to STAN...")
+
+			// reconnect to STAN,
+			if err = sc.connectToStan(); err == nil {
+				sc.logger.Error("Handling STAN disconnection: reconnected to STAN")
+
+				break
+			} else {
+				sc.logger.Error(fmt.Sprintf("Handling STAN disconnection: failed to reconnect to STAN: %s", err))
+
+				time.Sleep(reconnectDelaySeconds * time.Second)
+			}
 		}
 	}
 
@@ -499,7 +461,7 @@ func (sc *Client) handleStanDisconnection(conn stan.Conn, err error) {
 }
 
 // establish connection to NATS server, with lock on server urls
-func (sc *Client) connectToNats() (*nats.Conn, error) {
+func (sc *Client) connectToNats() (err error) {
 	sc.logger.Log("Connecting to NATS")
 
 	// options for connections
@@ -541,47 +503,65 @@ func (sc *Client) connectToNats() (*nats.Conn, error) {
 	sc.serversLock.Unlock()
 
 	// connect with options,
-	conn, err := nats.Connect(
+	sc.natsConn, err = nats.Connect(
 		serversURL,
 		options...,
 	)
 
 	if err != nil {
-		if conn != nil {
-			conn.Close()
+		if sc.natsConn != nil {
+			sc.logger.Error("Closing errorneous NATS connection")
+
+			sc.natsConn.Close()
+			sc.natsConn = nil
 		}
 
-		return nil, err
+		return err
 	}
 
 	sc.natsConnected = true
 
-	return conn, nil
+	return nil
 }
 
 // establish connection to STAN server
-func (sc *Client) connectToStan(natsConn *nats.Conn) (stan.Conn, error) {
+func (sc *Client) connectToStan() (err error) {
 	sc.logger.Log("Connecting to STAN")
 
-	conn, err := stan.Connect(
+	sc.stanConn, err = stan.Connect(
 		sc.stanClusterID,
 		sc.stanClientID,
 		stan.ConnectWait(connectTimeoutSeconds*time.Second),
-		stan.NatsConn(natsConn),
+		stan.NatsConn(sc.natsConn),
 		stan.SetConnectionLostHandler(sc.handleStanDisconnection),
 	)
 
 	if err != nil {
-		if conn != nil {
-			conn.Close()
+		// if connection to NATS is incomplete,
+		if err == stan.ErrBadConnection {
+			if sc.natsConn != nil {
+				sc.logger.Error(fmt.Sprintf("Closing errorneous NATS connection: %s", err))
+
+				sc.natsConn.Close()
+				sc.natsConn = nil
+			}
+			sc.natsConnected = false
 		}
 
-		return nil, err
+		if sc.stanConn != nil {
+			sc.logger.Error("Closing errorneous STAN connection")
+
+			sc.stanConn.Close()
+			sc.stanConn = nil
+		}
+		sc.stanConnected = false
+
+		return err
 	}
 
 	sc.stanConnected = true
 
-	return conn, nil
+	return nil
 }
 
 // subscribe to subjects
