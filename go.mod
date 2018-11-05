@@ -17,10 +17,10 @@ require (
 	github.com/nats-io/nuid v1.0.0 // indirect
 	github.com/pascaldekloe/goe v0.0.0-20180627143212-57f6aae5913c // indirect
 	golang.org/x/crypto v0.0.0-20181030102418-4d3f4d9ffa16 // indirect
-	golang.org/x/net v0.0.0-20181029044818-c44066c5c816 // indirect
+	golang.org/x/net v0.0.0-20181102091132-c10e9556a7bc // indirect
 	golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f // indirect
-	golang.org/x/sys v0.0.0-20181030150119-7e31e0c00fa0 // indirect
-	google.golang.org/appengine v1.2.0 // indirect
+	golang.org/x/sys v0.0.0-20181031143558-9b800f95dbbc // indirect
+	google.golang.org/appengine v1.3.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	gopkg.in/vmihailenco/msgpack.v2 v2.9.1 // indirect
 )
