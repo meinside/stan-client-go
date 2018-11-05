@@ -315,12 +315,7 @@ func (sc *Client) Close() {
 
 // called when NATS disconnects, with lock on connections
 func (sc *Client) handleNatsDisconnection(nc *nats.Conn) {
-	sc.logger.Error(fmt.Sprintf("Handling NATS disconnection: disconnected from NATS"))
-
-	sc.connLock.Lock()
-	defer sc.connLock.Unlock()
-
-	sc.natsConnected = false
+	sc.logger.Error("Handling NATS disconnection: disconnected from NATS")
 
 	// XXX - will recover connection automatically (nats.MaxReconnects(-1))
 }
