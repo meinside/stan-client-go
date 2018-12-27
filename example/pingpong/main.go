@@ -13,8 +13,8 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/meinside/stan-client-go"
-	"github.com/nats-io/go-nats-streaming"
+	stanclient "github.com/meinside/stan-client-go"
+	stan "github.com/nats-io/go-nats-streaming"
 )
 
 const (
@@ -46,12 +46,12 @@ type pingPong struct {
 type logger struct {
 }
 
-func (l *logger) Log(msg string) {
-	log.Println(msg)
+func (l *logger) Log(format string, args ...interface{}) {
+	log.Printf(format, args...)
 }
 
-func (l *logger) Error(err string) {
-	log.Println("ERROR: " + err)
+func (l *logger) Error(format string, args ...interface{}) {
+	log.Printf("ERROR: "+format, args...)
 }
 
 var sc *stanclient.Client
