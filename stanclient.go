@@ -96,7 +96,7 @@ type Client struct {
 	stanConn stan.Conn
 
 	// sync locks
-	connLock    sync.Mutex
+	sync.RWMutex
 	serversLock sync.Mutex
 
 	// flags for connections
@@ -197,12 +197,12 @@ func Connect(
 func (sc *Client) Poll() {
 	sc.logger.Log("Start polling subscriptions")
 
-	sc.connLock.Lock()
+	sc.Lock()
 
 	sc.chanSubscription = make(chan *stan.Msg, channelSize)
 	sc.chanQuitLoop = make(chan struct{}, 1)
 
-	sc.connLock.Unlock()
+	sc.Unlock()
 
 loop:
 	for {
@@ -227,8 +227,8 @@ func (sc *Client) Publish(subject string, obj interface{}) (err error) {
 		return fmt.Errorf("cannot publish, should stop now")
 	}
 
-	sc.connLock.Lock()
-	defer sc.connLock.Unlock()
+	sc.RLock()
+	defer sc.RUnlock()
 
 	var data []byte
 	if data, err = json.Marshal(obj); err == nil {
@@ -252,8 +252,8 @@ func (sc *Client) PublishAsync(subject string, obj interface{}) (nuid string, er
 		return "", fmt.Errorf("cannot publish, should stop now")
 	}
 
-	sc.connLock.Lock()
-	defer sc.connLock.Unlock()
+	sc.RLock()
+	defer sc.RUnlock()
 
 	var data []byte
 	if data, err = json.Marshal(obj); err == nil {
@@ -287,8 +287,8 @@ func (sc *Client) Close() {
 	// for stopping infinite-loops of reconnection
 	sc.shouldStopAll = true
 
-	sc.connLock.Lock()
-	defer sc.connLock.Unlock()
+	sc.Lock()
+	defer sc.Unlock()
 
 	// stop polling
 	if sc.chanQuitLoop != nil {
@@ -347,8 +347,8 @@ func (sc *Client) handleNatsClosed(nc *nats.Conn) {
 func (sc *Client) handleNatsReconnection(nc *nats.Conn) {
 	sc.logger.Error("Handling NATS reconnection: reconnected to NATS: %s", nc.ConnectedUrl())
 
-	sc.connLock.Lock()
-	defer sc.connLock.Unlock()
+	sc.Lock()
+	defer sc.Unlock()
 
 	// disconnect from STAN,
 	if sc.stanConn != nil {
@@ -410,8 +410,8 @@ func (sc *Client) handleStanDisconnection(conn stan.Conn, err error) {
 		sc.logger.Error("Handling STAN disconnection: connection to STAN closed")
 	}
 
-	sc.connLock.Lock()
-	defer sc.connLock.Unlock()
+	sc.Lock()
+	defer sc.Unlock()
 
 	// disconnect from STAN,
 	if sc.stanConn != nil {
