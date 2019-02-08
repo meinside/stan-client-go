@@ -15,8 +15,8 @@ import (
 
 // Constants
 const (
-	connectTimeoutSeconds = 5
-	reconnectDelaySeconds = 5
+	connectTimeoutSeconds = 10
+	reconnectDelaySeconds = 2
 
 	stanQueueSize = 64
 	subsQueueSize = 32
