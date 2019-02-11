@@ -15,8 +15,10 @@ import (
 
 // Constants
 const (
-	connectTimeoutSeconds = 10
+	connectTimeoutSeconds = 5
 	reconnectDelaySeconds = 2
+	pingInterval          = 5
+	pingMaxCount          = 3
 
 	stanQueueSize = 64
 	subsQueueSize = 32
@@ -663,6 +665,7 @@ func (sc *Client) connectToStan() (err error) {
 		stan.ConnectWait(connectTimeoutSeconds*time.Second),
 		stan.NatsConn(sc.natsConn),
 		stan.SetConnectionLostHandler(sc.handleStanDisconnection),
+		stan.Pings(pingInterval, pingMaxCount),
 	)
 
 	if err != nil {
