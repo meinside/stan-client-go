@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	nats "github.com/nats-io/go-nats"
-	stan "github.com/nats-io/go-nats-streaming"
+	nats "github.com/nats-io/nats.go"
+	stan "github.com/nats-io/stan.go"
 )
 
 // Constants
