@@ -14,7 +14,7 @@ import (
 	"time"
 
 	stanclient "github.com/meinside/stan-client-go"
-	stan "github.com/nats-io/go-nats-streaming"
+	stan "github.com/nats-io/stan.go"
 )
 
 const (
